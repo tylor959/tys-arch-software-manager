@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ty's ASM
+GenericName=Software Manager
+Comment=A friendly software center for Arch Linux
+Exec=tys-asm
+Icon=tys-asm
+Terminal=false
+Categories=System;PackageManager;

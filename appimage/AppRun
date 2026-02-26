@@ -1,0 +1,7 @@
+#!/bin/bash
+# AppImage entry point for Ty's ASM
+SELF=$(readlink -f "$0")
+HERE=${SELF%/*}
+export PATH="${HERE}/usr/bin:${PATH}"
+export PYTHONPATH="${HERE}/usr/lib/python3/site-packages:${PYTHONPATH}"
+exec python3 -m asm.main "$@"
