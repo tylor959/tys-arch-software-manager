@@ -157,19 +157,23 @@ yay -S tys-asm
 ### Step 2: Manual installation (from source)
 
 ```bash
-# Clone the repository
-git clone https://github.com/tys-asm/arch-software-manager.git
-cd arch-software-manager
+# 1. Install system dependencies (Arch)
+sudo pacman -S python python-pyqt6 python-requests polkit
 
-# Install with pip (editable mode for development)
-pip install -e .
+# 2. Clone the repository
+git clone https://github.com/tylor959/tys-arch-software-manager.git
+cd tys-arch-software-manager
+
+# 3. Run from source (no install)
+python -m asm.main
 ```
 
-Or install dependencies only and run directly:
+To install the `tys-asm` command so you can run it from anywhere:
 
 ```bash
-pip install -r requirements.txt
-python -m asm.main
+# After steps 1–2 above:
+pip install -e .
+# Then run: tys-asm
 ```
 
 ### Step 3: AppImage (portable)
