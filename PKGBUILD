@@ -6,6 +6,7 @@ pkgdesc="Ty's ASM - A friendly software center for Arch Linux"
 arch=('any')
 url="https://github.com/tys-asm/arch-software-manager"
 license=('GPL3')
+makedepends=('git')
 depends=(
     'python>=3.11'
     'python-pyqt6'
@@ -15,21 +16,23 @@ depends=(
 optdepends=(
     'paru: AUR package installation'
     'flatpak: Flatpak/Flathub support'
+    'snapd: Snap package support'
     'debtap: .deb file installation'
     'rpmextract: .rpm file installation'
     'papirus-icon-theme: better icon resolution'
     'paccache: package cache cleaning'
     'reflector: mirror list management'
 )
-source=("$pkgname-$pkgver.tar.gz")
+source=("git+${url}.git")
 sha256sums=('SKIP')
 
 package() {
-    cd "$srcdir/$pkgname-$pkgver"
+    _pyver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    cd "$srcdir/arch-software-manager"
 
     # Install Python package
-    install -d "$pkgdir/usr/lib/python3.14/site-packages"
-    cp -r asm "$pkgdir/usr/lib/python3.14/site-packages/"
+    install -d "$pkgdir/usr/lib/python${_pyver}/site-packages"
+    cp -r asm "$pkgdir/usr/lib/python${_pyver}/site-packages/"
 
     # Install launcher script
     install -Dm755 /dev/stdin "$pkgdir/usr/bin/tys-asm" <<'LAUNCHER'

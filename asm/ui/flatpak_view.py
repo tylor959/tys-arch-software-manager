@@ -14,6 +14,7 @@ from asm.core.worker import TaskWorker
 from asm.core.icon_resolver import resolve_icon
 from asm.ui.widgets.app_card import AppCard
 from asm.ui.widgets.progress_dialog import ProgressDialog
+from asm.ui.widgets.flatpak_move_dialog import FlatpakMoveDialog
 
 COLS = 2
 
@@ -231,7 +232,7 @@ class FlatpakView(QWidget):
             return
         self._installed_results = data
         self._installed_count.setText(f"{len(data)} Flatpak apps installed")
-        self._populate_grid(self._installed_grid, data)
+        self._populate_installed_grid(data)
 
     def _populate_grid(self, grid: QGridLayout, apps: list[flatpak_backend.FlatpakApp]) -> None:
         while grid.count():
@@ -262,6 +263,38 @@ class FlatpakView(QWidget):
             row, col = divmod(idx, COLS)
             grid.addWidget(card, row, col)
 
+    def _populate_installed_grid(self, apps: list[flatpak_backend.FlatpakApp]) -> None:
+        """Populate installed grid with Move button."""
+        while self._installed_grid.count():
+            child = self._installed_grid.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        if not apps:
+            lbl = QLabel("No Flatpak apps installed.")
+            lbl.setObjectName("viewSubtitle")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._installed_grid.addWidget(lbl, 0, 0, 1, COLS)
+            return
+
+        for idx, app in enumerate(apps[:200]):
+            icon = resolve_icon(app.app_id.split(".")[-1] if app.app_id else app.name)
+            card = AppCard(
+                name=app.name or app.app_id,
+                description=app.description,
+                size=app.installed_size or app.origin,
+                icon=icon,
+                installed=True,
+                version=app.version,
+                show_move_btn=True,
+            )
+            card.pkg_name = app.app_id
+            card.install_clicked.connect(self._on_install)
+            card.remove_clicked.connect(self._on_remove)
+            card.move_clicked.connect(self._on_move)
+            row, col = divmod(idx, COLS)
+            self._installed_grid.addWidget(card, row, col)
+
     def _on_install(self, app_id: str) -> None:
         reply = QMessageBox.question(
             self, "Install Flatpak",
@@ -273,7 +306,53 @@ class FlatpakView(QWidget):
             dlg = ProgressDialog(f"Installing {app_id}", cmd, total_steps=50, privileged=False, parent=self)
             dlg.exec()
             if dlg.success:
+                flatpak_backend.invalidate_flatpak_cache()
                 self._load_installed()
+
+    def _on_move(self, app_id: str) -> None:
+        app = next((a for a in self._installed_results if a.app_id == app_id), None)
+        if not app:
+            return
+        installations = flatpak_backend.list_installations()
+        if len(installations) < 2:
+            QMessageBox.information(
+                self, "No Custom Installations",
+                "To move Flatpak apps to a different disk, you need to set up a custom installation first.\n\n"
+                "Create a config file in /etc/flatpak/installations.d/ with:\n\n"
+                "[Installation \"extra\"]\n"
+                "Path=/path/to/your/disk/flatpak/\n"
+                "DisplayName=Extra Installation\n"
+                "StorageType=harddisk\n\n"
+                "See: https://docs.flatpak.org/en/latest/tips-and-tricks.html",
+            )
+            return
+        dlg = FlatpakMoveDialog(app_id, app.name or app_id, parent=self)
+        from PyQt6.QtWidgets import QDialog
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        target = dlg.get_target_installation()
+        if not target:
+            return
+        current = flatpak_backend.get_installation_for_app(app_id)
+        uninstall_cmd = flatpak_backend.uninstall_command(app_id, current)
+        install_cmd = flatpak_backend.install_to_installation_command(app_id, target)
+        dlg1 = ProgressDialog(f"Uninstalling {app_id}", uninstall_cmd, total_steps=10, privileged=True, parent=self)
+        dlg1.exec()
+        if not dlg1.success:
+            QMessageBox.warning(self, "Move Failed", "Uninstall failed. Move aborted.")
+            return
+        flatpak_backend.invalidate_flatpak_cache()
+        dlg2 = ProgressDialog(f"Installing {app_id} to {target}", install_cmd, total_steps=50, privileged=True, parent=self)
+        dlg2.exec()
+        if dlg2.success:
+            flatpak_backend.invalidate_flatpak_cache()
+            self._load_installed()
+            QMessageBox.information(self, "Move Complete", f"'{app.name or app_id}' has been moved successfully.")
+        else:
+            QMessageBox.warning(
+                self, "Move Incomplete",
+                f"Uninstall succeeded but install to {target} failed. You may need to reinstall the app.",
+            )
 
     def _on_remove(self, app_id: str) -> None:
         reply = QMessageBox.question(
@@ -286,12 +365,15 @@ class FlatpakView(QWidget):
             dlg = ProgressDialog(f"Removing {app_id}", cmd, total_steps=20, privileged=False, parent=self)
             dlg.exec()
             if dlg.success:
+                flatpak_backend.invalidate_flatpak_cache()
                 self._load_installed()
 
     def _update_all(self) -> None:
         cmd = flatpak_backend.update_command()
         dlg = ProgressDialog("Updating all Flatpak apps", cmd, total_steps=50, privileged=False, parent=self)
         dlg.exec()
+        if dlg.success:
+            flatpak_backend.invalidate_flatpak_cache()
         self._load_installed()
 
     @staticmethod

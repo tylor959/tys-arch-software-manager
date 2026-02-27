@@ -23,6 +23,15 @@ _MAX_SAMPLES = 20
 _DEFAULT_LINES = 50
 
 
+def is_using_bootstrap(cmd: Sequence[str]) -> bool:
+    """Return True if we have no real history and are using bootstrap/defaults."""
+    key = _op_key(cmd)
+    history = _load()
+    has_lines = bool(history.get(key, {}).get("lines", []))
+    has_durations = bool(history.get(key, {}).get("durations", []))
+    return not has_lines and not has_durations
+
+
 def _op_key(cmd: Sequence[str]) -> str:
     """Derive a short key from a command list.
 
@@ -41,6 +50,17 @@ def _op_key(cmd: Sequence[str]) -> str:
     return f"{base}_{flag}" if flag else base
 
 
+# Bootstrap defaults for common commands (lines, duration_secs) when history is empty
+_BOOTSTRAP: dict[str, tuple[int, float]] = {
+    "pacman_-S": (80, 45.0),
+    "paru_-S": (150, 120.0),
+    "yay_-S": (150, 120.0),
+    "pacman_-Rns": (30, 15.0),
+    "debtap": (60, 90.0),
+    "flatpak": (80, 60.0),
+}
+
+
 def _load() -> dict:
     try:
         if _HISTORY_FILE.exists():
@@ -57,16 +77,28 @@ def _save(data: dict) -> None:
         pass
 
 
+def is_using_bootstrap(cmd: Sequence[str]) -> bool:
+    """Return True if we have no real history and are using bootstrap/defaults."""
+    key = _op_key(cmd)
+    history = _load()
+    has_lines = bool(history.get(key, {}).get("lines", []))
+    has_durations = bool(history.get(key, {}).get("durations", []))
+    return not has_lines and not has_durations
+
+
 def estimate_total_lines(cmd: Sequence[str]) -> int:
     """Predict how many output lines this command will produce.
 
-    Returns a reasonable default if no history is available.
+    Returns bootstrap defaults for common commands when history is empty,
+    otherwise a reasonable default.
     """
     key = _op_key(cmd)
     history = _load()
     samples = history.get(key, {}).get("lines", [])
     if samples:
         return max(int(statistics.median(samples)), 5)
+    if key in _BOOTSTRAP:
+        return _BOOTSTRAP[key][0]
     return _DEFAULT_LINES
 
 
@@ -93,4 +125,6 @@ def estimate_duration(cmd: Sequence[str]) -> float | None:
     samples = history.get(key, {}).get("durations", [])
     if samples:
         return statistics.median(samples)
+    if key in _BOOTSTRAP:
+        return _BOOTSTRAP[key][1]
     return None

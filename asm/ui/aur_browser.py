@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 from asm.core.worker import TaskWorker
 from asm.core.aur_client import search as aur_search, AURPackage
 from asm.core import paru_backend
+from asm.core.pacman_backend import invalidate_pacman_cache
 from asm.core.pacman_backend import is_installed
 from asm.core.icon_resolver import resolve_icon
 from asm.ui.widgets.app_card import AppCard
@@ -166,6 +167,8 @@ class AURBrowser(QWidget):
                     total_steps=100, privileged=False, parent=self,
                 )
                 dlg.exec()
+                if dlg.success:
+                    invalidate_pacman_cache()
         else:
             QMessageBox.information(
                 self, "paru Required",
@@ -187,6 +190,8 @@ class AURBrowser(QWidget):
                 cmd = remove_command([pkg_name])
             dlg = ProgressDialog(f"Removing {pkg_name}", cmd, total_steps=20, privileged=True, parent=self)
             dlg.exec()
+            if dlg.success:
+                invalidate_pacman_cache()
 
     def _set_loading(self, loading: bool) -> None:
         self._loading_bar.setVisible(loading)

@@ -7,17 +7,23 @@ offers to install them, resolves dependencies, and provides rollback on failure.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Callable
 
+from asm.core.logger import get_logger
 from asm.core.pacman_backend import is_installed
+
+_log = get_logger("file_installer")
 
 
 class FileType(Enum):
@@ -107,6 +113,13 @@ def analyze_file(path: str) -> FileAnalysis:
     )
 
 
+def _tool_available(name: str) -> bool:
+    """Check if a tool is available (PATH or /usr/bin fallback)."""
+    if shutil.which(name):
+        return True
+    return (Path("/usr/bin") / name).exists()
+
+
 def _check_tools(ft: FileType) -> list[str]:
     """Check which required tools are missing for a given file type."""
     required: dict[FileType, list[str]] = {
@@ -117,8 +130,17 @@ def _check_tools(ft: FileType) -> list[str]:
         FileType.APPIMAGE: [],
         FileType.FLATPAK: ["flatpak"],
     }
+    if ft == FileType.RPM:
+        # rpmextract, rpm2cpio, or bsdtar (libarchive) can extract RPM
+        if any(_tool_available(t) for t in ("rpmextract", "rpm2cpio", "bsdtar")):
+            return []
+        _log.info("RPM tools check: rpmextract, rpm2cpio, and bsdtar all missing")
+        return ["rpmextract"]
     tools = required.get(ft, [])
-    return [t for t in tools if not shutil.which(t)]
+    missing = [t for t in tools if not _tool_available(t)]
+    if missing:
+        _log.info("Tools check for %s: missing %s", ft.value, missing)
+    return missing
 
 
 def _detect_build_system(archive_path: str) -> str:
@@ -168,6 +190,22 @@ def _match_build_system(names: list[str]) -> str:
 
 # ── Installation handlers ──
 
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences for clean display."""
+    return re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text)
+
+
+def _format_debtap_output(result: subprocess.CompletedProcess[str]) -> str:
+    """Extract meaningful debtap stdout/stderr for error messages."""
+    parts: list[str] = []
+    if result.stdout and result.stdout.strip():
+        parts.append(_strip_ansi(result.stdout.strip()))
+    if result.stderr and result.stderr.strip():
+        parts.append(_strip_ansi(result.stderr.strip()))
+    return "\n".join(parts) if parts else ""
+
+
 def install_appimage(path: str, integrate: bool = True) -> InstallResult:
     """Install an AppImage — make executable and optionally create .desktop entry."""
     warnings: list[str] = []
@@ -181,8 +219,10 @@ def install_appimage(path: str, integrate: bool = True) -> InstallResult:
         if integrate:
             _create_appimage_desktop(dest)
 
+        _log.info("AppImage: installed to %s", dest)
         return InstallResult(True, f"AppImage installed to {dest}", warnings)
     except Exception as e:
+        _log.exception("AppImage: installation failed")
         return InstallResult(False, f"AppImage installation failed: {e}", warnings)
 
 
@@ -202,9 +242,16 @@ def _create_appimage_desktop(appimage_path: Path) -> None:
     )
 
 
-def install_deb(path: str) -> InstallResult:
+def install_deb(
+    path: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> InstallResult:
     """Install a .deb file by converting with debtap then installing with pacman."""
     warnings: list[str] = []
+
+    def _progress(msg: str) -> None:
+        if progress_callback:
+            progress_callback(msg)
 
     if not shutil.which("debtap"):
         if is_installed("debtap"):
@@ -218,82 +265,127 @@ def install_deb(path: str) -> InstallResult:
 
     with tempfile.TemporaryDirectory(prefix="asm-deb-") as tmpdir:
         try:
-            # Update debtap database if needed
+            # Update debtap database if needed (first run or >24h since last update)
             db_check = subprocess.run(
                 ["debtap", "-Q"], capture_output=True, text=True, timeout=5,
             )
-            if "need to update" in db_check.stdout.lower() or db_check.returncode != 0:
+            need_update = (
+                "need to update" in (db_check.stdout or "").lower()
+                or "need to update" in (db_check.stderr or "").lower()
+                or db_check.returncode != 0
+            )
+            if not need_update:
+                debtap_cache = Path("/var/cache/debtap")
+                if debtap_cache.exists():
+                    try:
+                        mtimes = [f.stat().st_mtime for f in debtap_cache.rglob("*") if f.is_file()]
+                        if mtimes and (time.time() - max(mtimes)) > 86400:  # 24h
+                            need_update = True
+                    except OSError:
+                        pass
+            if need_update:
+                _progress("Updating debtap database...")
                 warnings.append("Updating debtap database (first-time setup)...")
+                _log.info("DEB: updating debtap database")
                 subprocess.run(
                     ["pkexec", "debtap", "-u"],
                     capture_output=True, text=True, timeout=300,
                 )
 
+            _progress("Converting .deb with debtap...")
+            _log.info("DEB: converting %s with debtap", path)
+            # Use cwd=tmpdir so debtap creates working dir inside our temp; -o for final output
+            abs_tmpdir = str(Path(tmpdir).resolve())
             result = subprocess.run(
-                ["debtap", "-Q", path],
-                capture_output=True, text=True, timeout=120,
+                ["debtap", "-Q", "-o", abs_tmpdir, path],
+                capture_output=True, text=True, timeout=300,
                 cwd=tmpdir,
             )
 
-            pkg_files = list(Path(tmpdir).glob("*.pkg.tar*"))
+            pkg_files = list(Path(tmpdir).rglob("*.pkg.tar*"))
             if not pkg_files:
-                # Try non-Q mode
+                # Try non-Q mode; provide enough input to skip all prompts:
+                # continue? y, packager name? \n, license? \n, editor? \n (skip)
                 result = subprocess.run(
-                    ["debtap", path],
-                    input="y\n\n",
-                    capture_output=True, text=True, timeout=120,
+                    ["debtap", "-o", abs_tmpdir, path],
+                    input="y\n\n\n\n\n",
+                    capture_output=True, text=True, timeout=300,
                     cwd=tmpdir,
                 )
-                pkg_files = list(Path(tmpdir).glob("*.pkg.tar*"))
+                pkg_files = list(Path(tmpdir).rglob("*.pkg.tar*"))
 
             if not pkg_files:
-                return InstallResult(False, "debtap failed to produce a package file", warnings)
+                debtap_err = _format_debtap_output(result)
+                msg = debtap_err if debtap_err else "debtap failed to produce a package file"
+                _log.warning("DEB: debtap failed to produce package: %s", debtap_err or "(no output)")
+                return InstallResult(False, msg, warnings)
 
+            # Pick the package file (rglob may find it in tmpdir or subdirs)
+            pkg_file = next((f for f in pkg_files if ".pkg.tar" in f.name and f.suffix in (".zst", ".xz", ".gz")), pkg_files[0])
+
+            _progress("Installing with pacman...")
             install_result = subprocess.run(
-                ["pkexec", "pacman", "-U", "--noconfirm", str(pkg_files[0])],
+                ["pkexec", "pacman", "-U", "--noconfirm", str(pkg_file)],
                 capture_output=True, text=True, timeout=120,
             )
 
             if install_result.returncode == 0:
+                _log.info("DEB: installed successfully from %s", path)
                 return InstallResult(True, "Package installed successfully from .deb", warnings)
             else:
+                _log.warning("DEB: pacman -U failed: %s", install_result.stderr)
                 return InstallResult(
                     False,
                     f"pacman -U failed: {install_result.stderr.strip()}",
                     warnings,
                 )
         except subprocess.TimeoutExpired:
+            _log.warning("DEB: installation timed out")
             return InstallResult(False, "Installation timed out", warnings)
         except Exception as e:
+            _log.exception("DEB: installation error")
             return InstallResult(False, f"Error: {e}", warnings)
 
 
 def install_rpm(path: str) -> InstallResult:
     """Install an .rpm file by extracting and attempting to install."""
     warnings: list[str] = []
-    if not shutil.which("rpmextract") and not shutil.which("rpm2cpio"):
+    # bsdtar (libarchive) can extract RPM directly; rpmextract and rpm2cpio are alternatives
+    if not any(_tool_available(t) for t in ("rpmextract", "rpm2cpio", "bsdtar")):
         return InstallResult(
             False,
-            "rpmextract or rpm2cpio required. Install with: sudo pacman -S rpmextract",
+            "rpmextract, rpm2cpio, or bsdtar required. Install with: sudo pacman -S rpmextract",
             warnings,
         )
 
     with tempfile.TemporaryDirectory(prefix="asm-rpm-") as tmpdir:
         try:
-            if shutil.which("rpmextract"):
-                subprocess.run(
+            result = None
+            if _tool_available("rpmextract"):
+                result = subprocess.run(
                     ["rpmextract", path],
                     cwd=tmpdir, capture_output=True, text=True, timeout=60,
                 )
+            elif _tool_available("bsdtar"):
+                result = subprocess.run(
+                    ["bsdtar", "-xf", path],
+                    cwd=tmpdir, capture_output=True, text=True, timeout=60,
+                )
             else:
-                subprocess.run(
-                    ["bash", "-c", f"rpm2cpio '{path}' | cpio -idmv"],
+                result = subprocess.run(
+                    ["bash", "-c", f"rpm2cpio {shlex.quote(path)} | cpio -idmv"],
                     cwd=tmpdir, capture_output=True, text=True, timeout=60,
                 )
 
             extracted = list(Path(tmpdir).rglob("*"))
             if not extracted:
-                return InstallResult(False, "RPM extraction produced no files", warnings)
+                err_msg = "RPM extraction produced no files"
+                if result is not None:
+                    out = (result.stderr or "").strip() or (result.stdout or "").strip()
+                    if out:
+                        err_msg += f". Output: {_strip_ansi(out)[:500]}"
+                _log.warning("RPM: extraction failed for %s", path)
+                return InstallResult(False, err_msg, warnings)
 
             # Copy extracted files to system
             result = subprocess.run(
@@ -302,8 +394,10 @@ def install_rpm(path: str) -> InstallResult:
             )
 
             warnings.append(f"Extracted {len(extracted)} files from RPM (best-effort install)")
+            _log.info("RPM: extracted and installed %s", path)
             return InstallResult(True, "RPM contents extracted and installed", warnings)
         except Exception as e:
+            _log.exception("RPM: installation failed")
             return InstallResult(False, f"RPM install failed: {e}", warnings)
 
 
@@ -357,10 +451,13 @@ def install_flatpak_file(path: str) -> InstallResult:
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode == 0:
+            _log.info("Flatpak: installed %s", path)
             return InstallResult(True, "Flatpak package installed successfully", warnings)
         else:
+            _log.warning("Flatpak: install failed: %s", result.stderr)
             return InstallResult(False, f"Flatpak install failed: {result.stderr.strip()}", warnings)
     except Exception as e:
+        _log.exception("Flatpak: installation error")
         return InstallResult(False, f"Flatpak error: {e}", warnings)
 
 

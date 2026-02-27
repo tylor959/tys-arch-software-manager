@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 from asm.core.worker import TaskWorker
 from asm.core.pacman_backend import (
     search_repos, get_groups, get_group_packages, install_command,
-    PackageInfo, is_installed,
+    PackageInfo, is_installed, invalidate_pacman_cache,
 )
 from asm.core.pkgstats import get_popularity_batch
 from asm.core.icon_resolver import resolve_icon
@@ -226,6 +226,7 @@ class RepoBrowser(QWidget):
             dlg = ProgressDialog(f"Installing {pkg_name}", cmd, total_steps=30, privileged=True, parent=self)
             dlg.exec()
             if dlg.success:
+                invalidate_pacman_cache()
                 self._do_search()
 
     def _on_remove(self, pkg_name: str) -> None:
@@ -240,6 +241,7 @@ class RepoBrowser(QWidget):
             dlg = ProgressDialog(f"Removing {pkg_name}", cmd, total_steps=20, privileged=True, parent=self)
             dlg.exec()
             if dlg.success:
+                invalidate_pacman_cache()
                 self._do_search()
 
     def _set_loading(self, loading: bool) -> None:

@@ -11,6 +11,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Literal
 
+from asm.core.cache import get, set_, CACHE_TTL_SEARCH
+
 AUR_RPC_URL = "https://aur.archlinux.org/rpc/"
 AUR_PACKAGE_URL = "https://aur.archlinux.org/packages/"
 REQUEST_TIMEOUT = 15
@@ -34,18 +36,20 @@ class AURPackage:
 
 
 def search(query: str, by: str = "name-desc") -> list[AURPackage]:
-    """Search AUR packages by query string.
+    """Search AUR packages by query string. Cached 5 min."""
+    cache_key = f"aur_search:{query}:{by}"
+    cached_result = get(cache_key, CACHE_TTL_SEARCH)
+    if cached_result is not None:
+        return cached_result
 
-    Args:
-        query: Search term
-        by: Search field — "name", "name-desc", or "maintainer"
-    """
     params = urllib.parse.urlencode({"v": 5, "type": "search", "by": by, "arg": query})
     url = f"{AUR_RPC_URL}?{params}"
     data = _fetch(url)
     if data is None:
         return []
-    return [_parse_result(r) for r in data.get("results", [])]
+    results = [_parse_result(r) for r in data.get("results", [])]
+    set_(cache_key, results, CACHE_TTL_SEARCH)
+    return results
 
 
 def info(names: list[str]) -> list[AURPackage]:

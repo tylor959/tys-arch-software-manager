@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
+
+from asm.core.logger import get_logger
+
+_log = get_logger("progress_dialog")
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
     QPushButton, QTextEdit, QSizePolicy,
 )
 
-from asm.core.worker import CommandWorker
+from asm.core.worker import CommandWorker, DebInstallWorker
 
 
 class ProgressDialog(QDialog):
@@ -82,6 +86,8 @@ class ProgressDialog(QDialog):
         self._worker.log_line.connect(self._on_log)
         self._worker.eta.connect(self._on_eta)
         self._worker.finished_sig.connect(self._on_finished)
+        self._worker.indeterminate_sig.connect(self._on_indeterminate)
+        _log.info("ProgressDialog: starting %s", title)
         self._worker.start()
 
     @property
@@ -101,11 +107,19 @@ class ProgressDialog(QDialog):
     def _on_eta(self, eta: str) -> None:
         self._eta_label.setText(eta)
 
+    def _on_indeterminate(self, indeterminate: bool) -> None:
+        if indeterminate:
+            self._progress.setRange(0, 0)
+        else:
+            self._progress.setRange(0, 100)
+
     def _on_finished(self, ok: bool, msg: str) -> None:
         self._success = ok
+        _log.info("ProgressDialog: %s", "completed" if ok else f"failed: {msg}")
         self._status_label.setText(msg)
         self._cancel_btn.setVisible(False)
         self._close_btn.setVisible(True)
+        self._progress.setRange(0, 100)
         if ok:
             self._progress.setValue(100)
             self._pct_label.setText("100%")
@@ -118,3 +132,74 @@ class ProgressDialog(QDialog):
     def _toggle_log(self, visible: bool) -> None:
         self._log.setVisible(visible)
         self.adjustSize()
+
+
+class DebProgressDialog(QDialog):
+    """Progress dialog for DEB install with step-based status updates."""
+
+    def __init__(self, path: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Converting and installing .deb")
+        self.setMinimumSize(520, 280)
+        self.setModal(True)
+        self._success = False
+        self._result = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        self._status_label = QLabel("Preparing...")
+        self._status_label.setObjectName("appName")
+        layout.addWidget(self._status_label)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)  # Indeterminate
+        layout.addWidget(self._progress)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumHeight(120)
+        self._log.setStyleSheet("font-family: monospace; font-size: 12px;")
+        layout.addWidget(self._log)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._close_btn = QPushButton("Close")
+        self._close_btn.setObjectName("primaryBtn")
+        self._close_btn.setVisible(False)
+        self._close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._close_btn)
+        layout.addLayout(btn_row)
+
+        self._worker = DebInstallWorker(path)
+        self._worker.progress_status.connect(self._on_status)
+        self._worker.finished_sig.connect(self._on_finished)
+        _log.info("DebProgressDialog: starting DEB install for %s", path)
+        self._worker.start()
+
+    @property
+    def success(self) -> bool:
+        return self._success
+
+    @property
+    def result(self):
+        """InstallResult when success, or Exception when failed."""
+        return self._result
+
+    def _on_status(self, msg: str) -> None:
+        self._status_label.setText(msg)
+        self._log.append(msg)
+
+    def _on_finished(self, ok: bool, data: object) -> None:
+        self._success = ok
+        self._result = data
+        self._progress.setRange(0, 100)
+        self._progress.setValue(100 if ok else 0)
+        if ok:
+            self._status_label.setText("Installation complete")
+        else:
+            msg = str(data) if isinstance(data, Exception) else getattr(data, "message", str(data))
+            self._status_label.setText("Installation failed")
+            self._log.append(f"Error: {msg}")
+        _log.info("DebProgressDialog: %s", "completed" if ok else "failed")
+        self._close_btn.setVisible(True)

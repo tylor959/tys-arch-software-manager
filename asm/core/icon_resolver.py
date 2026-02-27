@@ -27,7 +27,8 @@ ICON_THEME_DIRS = [
 
 THEME_SEARCH_ORDER = ["hicolor", "breeze", "breeze-dark", "Adwaita", "Papirus", "Papirus-Dark"]
 
-ICON_EXTENSIONS = [".svg", ".png", ".xpm"]
+# Prefer PNG over SVG to avoid Qt SVG gradient/pattern resolution warnings
+ICON_EXTENSIONS = [".png", ".svg", ".xpm"]
 ICON_SIZES = ["scalable", "256x256", "128x128", "96x96", "64x64", "48x48", "32x32", "24x24", "22x22", "16x16"]
 ICON_CATEGORIES = ["apps", "applications", "mimetypes", "categories", "places"]
 
@@ -42,8 +43,14 @@ def _get_fallback_pixmap() -> QPixmap:
     return _FALLBACK_PIXMAP
 
 
-def resolve_icon(name: str, desktop_icon_field: str = "") -> QIcon:
-    """Resolve an icon by name through the full resolution chain."""
+@lru_cache(maxsize=256)
+def _resolve_icon_cached(name: str, desktop_icon_field: str) -> QIcon:
+    """Internal cached resolution. Use resolve_icon() which handles cache invalidation."""
+    return _resolve_icon_impl(name, desktop_icon_field)
+
+
+def _resolve_icon_impl(name: str, desktop_icon_field: str) -> QIcon:
+    """Actual icon resolution logic."""
     icon_name = desktop_icon_field or name
 
     if not icon_name:
@@ -76,6 +83,11 @@ def resolve_icon(name: str, desktop_icon_field: str = "") -> QIcon:
 
     # 6) Fallback
     return QIcon.fromTheme("application-x-executable", QIcon(_get_fallback_pixmap()))
+
+
+def resolve_icon(name: str, desktop_icon_field: str = "") -> QIcon:
+    """Resolve an icon by name through the full resolution chain. Cached in-memory."""
+    return _resolve_icon_cached(name, desktop_icon_field or "")
 
 
 def _check_custom(name: str) -> QIcon | None:

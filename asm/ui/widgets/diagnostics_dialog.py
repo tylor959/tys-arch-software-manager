@@ -100,4 +100,7 @@ class DiagnosticsDialog(QDialog):
         if reply == QMessageBox.StandardButton.Yes:
             dlg = ProgressDialog(label, cmd, total_steps=20, privileged=True, parent=self)
             dlg.exec()
+            if dlg.success and cmd and cmd[0] in ("pacman", "paccache"):
+                from asm.core.pacman_backend import invalidate_pacman_cache
+                invalidate_pacman_cache()
             self._run_checks()

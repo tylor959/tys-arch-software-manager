@@ -21,7 +21,7 @@ from asm.core.desktop_parser import get_all_desktop_entries, find_desktop_for_pa
 from asm.core.icon_resolver import resolve_icon
 from asm.ui.widgets.app_card import AppCard
 from asm.ui.widgets.progress_dialog import ProgressDialog
-from asm.core.pacman_backend import remove_command
+from asm.core.pacman_backend import remove_command, invalidate_pacman_cache
 
 
 COLS = 2
@@ -226,6 +226,7 @@ class InstalledView(QWidget):
             dlg = ProgressDialog(f"Removing {pkg_name}", cmd, total_steps=20, privileged=True, parent=self)
             dlg.exec()
             if dlg.success:
+                invalidate_pacman_cache()
                 self._start_loading()
 
     def _on_info(self, pkg_name: str) -> None:

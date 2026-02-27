@@ -5,13 +5,19 @@ Wraps the flatpak CLI and optionally queries the Flathub API for richer metadata
 
 from __future__ import annotations
 
+import configparser
 import json
+import os
 import shutil
 import subprocess
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from asm.core.cache import get, set_, invalidate, CACHE_TTL_INSTALLED, CACHE_TTL_SEARCH
 
 FLATHUB_API = "https://flathub.org/api/v2"
+INSTALLATIONS_DIR = Path("/etc/flatpak/installations.d")
 REQUEST_TIMEOUT = 15
 
 
@@ -56,9 +62,12 @@ def setup_flathub_command() -> list[str]:
 
 
 def list_installed() -> list[FlatpakApp]:
-    """List installed Flatpak apps."""
+    """List installed Flatpak apps. Cached 60s."""
     if not is_available():
         return []
+    cached_result = get("flatpak_installed", CACHE_TTL_INSTALLED)
+    if cached_result is not None:
+        return cached_result
     try:
         result = subprocess.run(
             ["flatpak", "list", "--app", "--columns=application,name,version,branch,origin,size"],
@@ -77,15 +86,26 @@ def list_installed() -> list[FlatpakApp]:
                     installed_size=parts[5].strip() if len(parts) > 5 else "",
                     is_installed=True,
                 ))
+        set_("flatpak_installed", apps, CACHE_TTL_INSTALLED)
         return apps
     except Exception:
         return []
 
 
+def invalidate_flatpak_cache() -> None:
+    """Call after install/remove to refresh app list."""
+    invalidate("flatpak_installed")
+    invalidate("flatpak_search", prefix=True)
+
+
 def search_flathub(query: str) -> list[FlatpakApp]:
-    """Search Flathub via the flatpak CLI."""
+    """Search Flathub via the flatpak CLI. Cached 5 min."""
     if not is_available():
         return []
+    cache_key = f"flatpak_search_cli:{query}"
+    cached_result = get(cache_key, CACHE_TTL_SEARCH)
+    if cached_result is not None:
+        return cached_result
     try:
         result = subprocess.run(
             ["flatpak", "search", query, "--columns=application,name,description,version,branch,remotes"],
@@ -106,13 +126,18 @@ def search_flathub(query: str) -> list[FlatpakApp]:
                     origin=parts[5].strip() if len(parts) > 5 else "",
                     is_installed=app_id in installed,
                 ))
+        set_(cache_key, apps, CACHE_TTL_SEARCH)
         return apps
     except Exception:
         return []
 
 
 def search_flathub_api(query: str) -> list[FlatpakApp]:
-    """Search Flathub via REST API for richer metadata including icons."""
+    """Search Flathub via REST API for richer metadata including icons. Cached 5 min."""
+    cache_key = f"flatpak_search_api:{query}"
+    cached_result = get(cache_key, CACHE_TTL_SEARCH)
+    if cached_result is not None:
+        return cached_result
     try:
         payload = json.dumps({"query": query, "filters": []}).encode()
         req = urllib.request.Request(
@@ -138,6 +163,7 @@ def search_flathub_api(query: str) -> list[FlatpakApp]:
                 is_installed=app_id in installed,
                 icon_url=icon,
             ))
+        set_(cache_key, apps, CACHE_TTL_SEARCH)
         return apps
     except Exception:
         return search_flathub(query)
@@ -156,3 +182,77 @@ def remove_command(app_id: str) -> list[str]:
 def update_command() -> list[str]:
     """Return command to update all Flatpak apps."""
     return ["flatpak", "update", "-y"]
+
+
+# ── Custom installations (move to disk) ──
+
+@dataclass
+class FlatpakInstallation:
+    """A Flatpak installation (default or custom)."""
+    id: str
+    path: str
+    display_name: str
+
+
+def list_installations() -> list[FlatpakInstallation]:
+    """List available Flatpak installations (default + custom from /etc/flatpak/installations.d)."""
+    installations = [
+        FlatpakInstallation(id="system", path="/var/lib/flatpak", display_name="System (default)"),
+    ]
+    if not INSTALLATIONS_DIR.is_dir():
+        return installations
+    for conf_file in INSTALLATIONS_DIR.glob("*.conf"):
+        try:
+            parser = configparser.ConfigParser()
+            parser.read(conf_file)
+            for section in parser.sections():
+                if section.startswith("Installation "):
+                    id_val = parser.get(section, "Id", fallback="").strip('"')
+                    if not id_val and '"' in section:
+                        id_val = section.split('"', 2)[1]
+                    path_val = parser.get(section, "Path", fallback="").strip('"')
+                    display_val = parser.get(section, "DisplayName", fallback=id_val).strip('"')
+                    if id_val and path_val and os.path.isdir(path_val):
+                        installations.append(
+                            FlatpakInstallation(id=id_val, path=path_val, display_name=display_val or id_val)
+                        )
+        except (configparser.Error, OSError):
+            continue
+    return installations
+
+
+def get_installation_for_app(app_id: str) -> str | None:
+    """Return the installation id where the app is installed, or None."""
+    if not is_available():
+        return None
+    try:
+        result = subprocess.run(
+            ["flatpak", "info", "--show-location", app_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        loc = result.stdout.strip()
+        if "/var/lib/flatpak" in loc:
+            return "system"
+        for inst in list_installations():
+            if inst.id != "system" and inst.path in loc:
+                return inst.id
+        return "system"
+    except Exception:
+        return None
+
+
+def uninstall_command(app_id: str, installation: str | None = None) -> list[str]:
+    """Return command to uninstall. installation=None uses default."""
+    cmd = ["flatpak", "uninstall", "-y", app_id]
+    if installation and installation != "system":
+        cmd = ["flatpak", "--installation", installation, "uninstall", "-y", app_id]
+    return cmd
+
+
+def install_to_installation_command(app_id: str, installation_id: str) -> list[str]:
+    """Return command to install app to a specific installation."""
+    if installation_id == "system":
+        return ["flatpak", "install", "-y", "flathub", app_id]
+    return ["flatpak", "--installation", installation_id, "install", "-y", "flathub", app_id]

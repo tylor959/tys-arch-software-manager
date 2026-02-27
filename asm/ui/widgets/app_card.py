@@ -23,6 +23,7 @@ class AppCard(QFrame):
     remove_clicked = pyqtSignal(str)
     shortcut_clicked = pyqtSignal(str)
     info_clicked = pyqtSignal(str)
+    move_clicked = pyqtSignal(str)
 
     def __init__(
         self,
@@ -34,6 +35,7 @@ class AppCard(QFrame):
         votes: int | None = None,
         popularity: float | None = None,
         version: str = "",
+        show_move_btn: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -119,6 +121,15 @@ class AppCard(QFrame):
             remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             remove_btn.clicked.connect(lambda: self.remove_clicked.emit(self.pkg_name))
             btn_col.addWidget(remove_btn)
+
+            if show_move_btn:
+                move_btn = QPushButton("Move")
+                move_btn.setObjectName("secondaryBtn")
+                move_btn.setFixedSize(82, 28)
+                move_btn.setStyleSheet(f"QPushButton {{ {compact} }}")
+                move_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                move_btn.clicked.connect(lambda: self.move_clicked.emit(self.pkg_name))
+                btn_col.addWidget(move_btn)
 
             shortcut_btn = QPushButton("Shortcut")
             shortcut_btn.setObjectName("secondaryBtn")

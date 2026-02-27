@@ -362,7 +362,19 @@ class SettingsView(QWidget):
         license_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(license_label)
 
+        layout.addSpacing(12)
+        log_btn = QPushButton("View Log (Ctrl+Shift+L)")
+        log_btn.setObjectName("secondaryBtn")
+        log_btn.setToolTip("Open the application log for debugging")
+        log_btn.clicked.connect(self._open_log_viewer)
+        layout.addWidget(log_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
         return page
+
+    def _open_log_viewer(self) -> None:
+        from asm.ui.widgets.log_viewer_dialog import LogViewerDialog
+        dlg = LogViewerDialog(parent=self)
+        dlg.show()
 
     # ────────────────────────────────────
     # Logic: General
@@ -608,8 +620,11 @@ class SettingsView(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
+                from asm.core.pacman_backend import invalidate_pacman_cache
                 cmd = ["pacman", "-Rns", "--noconfirm"] + orphans
                 dlg = ProgressDialog("Removing orphans", cmd, total_steps=20, privileged=True, parent=self)
                 dlg.exec()
+                if dlg.success:
+                    invalidate_pacman_cache()
         except Exception as e:
             QMessageBox.warning(self, "Error", str(e))

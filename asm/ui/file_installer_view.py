@@ -16,10 +16,15 @@ from PyQt6.QtWidgets import (
 
 from asm.core.file_installer import (
     analyze_file, detect_file_type, FileType, FileAnalysis,
-    install_appimage, install_deb, install_rpm, install_flatpak_file,
+    install_appimage, install_rpm, install_flatpak_file,
 )
+from asm.core.logger import get_logger
+from asm.core.pacman_backend import invalidate_pacman_cache
+
+_log = get_logger("file_installer_view")
+from asm.core import flatpak_backend
 from asm.core.worker import TaskWorker
-from asm.ui.widgets.progress_dialog import ProgressDialog
+from asm.ui.widgets.progress_dialog import DebProgressDialog, ProgressDialog
 
 
 class FileInstallerView(QWidget):
@@ -172,15 +177,60 @@ class FileInstallerView(QWidget):
         if not self._current_analysis or not self._current_analysis.missing_tools:
             return
         tools = self._current_analysis.missing_tools
-        from asm.core.pacman_backend import install_command
-        cmd = install_command(tools)
-        dlg = ProgressDialog(
-            f"Installing tools: {', '.join(tools)}",
-            cmd, total_steps=20, privileged=True, parent=self,
-        )
-        dlg.exec()
-        if dlg.success:
-            self._handle_file(self._current_analysis.file_path)
+        from asm.core import paru_backend
+        from asm.core.pacman_backend import install_command, install_paru_command
+        # rpmextract is in official repos; use pacman directly (faster, no AUR)
+        if tools == ["rpmextract"]:
+            cmd = install_command(tools)
+            dlg = ProgressDialog(
+                "Installing rpmextract",
+                cmd, total_steps=10, privileged=True, parent=self,
+            )
+            dlg.exec()
+            if dlg.success:
+                self._handle_file(self._current_analysis.file_path)
+            return
+        # debtap etc. are in AUR; paru/yay handle both repos and AUR
+        helper = paru_backend.get_aur_helper()
+        if not helper:
+            _log.info("AUR helper missing: auto-installing paru from official repos")
+            # Auto-install paru from official repos, then retry
+            dlg1 = ProgressDialog(
+                "Installing paru (AUR helper)",
+                install_paru_command(),
+                total_steps=10,
+                privileged=True,
+                parent=self,
+            )
+            dlg1.exec()
+            if not dlg1.success:
+                _log.warning("Paru auto-install failed")
+                QMessageBox.warning(
+                    self, "Installation Failed",
+                    "Could not install paru. Some tools (e.g. debtap) require an AUR helper.\n\n"
+                    "Try manually: sudo pacman -S paru",
+                )
+                return
+            helper = paru_backend.get_aur_helper()
+        if helper:
+            _log.info("Installing tools via %s: %s", helper, tools)
+            cmd = paru_backend.install_command_for_helper(helper, tools)
+            dlg = ProgressDialog(
+                f"Installing tools: {', '.join(tools)}",
+                cmd, total_steps=20, privileged=False, parent=self,
+            )
+            dlg.exec()
+            if dlg.success:
+                self._handle_file(self._current_analysis.file_path)
+        else:
+            cmd = install_command(tools)
+            dlg = ProgressDialog(
+                f"Installing tools: {', '.join(tools)}",
+                cmd, total_steps=20, privileged=True, parent=self,
+            )
+            dlg.exec()
+            if dlg.success:
+                self._handle_file(self._current_analysis.file_path)
 
     def _do_install(self) -> None:
         a = self._current_analysis
@@ -215,13 +265,26 @@ class FileInstallerView(QWidget):
         worker.start()
 
     def _install_deb(self, path: str) -> None:
+        self._last_install_type = FileType.DEB
         self._status.setText("Converting and installing .deb...")
-        worker = TaskWorker(install_deb, path)
-        worker.finished_sig.connect(self._on_simple_result)
-        self._simple_worker = worker
-        worker.start()
+        dlg = DebProgressDialog(path, parent=self)
+        dlg.exec()
+        if dlg.success:
+            invalidate_pacman_cache()
+            res = dlg.result
+            msg = res.message if hasattr(res, "message") else "Package installed successfully from .deb"
+            if hasattr(res, "warnings") and res.warnings:
+                msg += "\n\nWarnings:\n" + "\n".join(res.warnings)
+            self._status.setText(msg)
+            QMessageBox.information(self, "Success", msg)
+        else:
+            res = dlg.result
+            msg = res.message if hasattr(res, "message") else str(res) if res else "Installation failed"
+            self._status.setText(msg)
+            QMessageBox.warning(self, "Installation Failed", msg)
 
     def _install_rpm(self, path: str) -> None:
+        self._last_install_type = FileType.RPM
         self._status.setText("Extracting and installing .rpm...")
         worker = TaskWorker(install_rpm, path)
         worker.finished_sig.connect(self._on_simple_result)
@@ -229,6 +292,7 @@ class FileInstallerView(QWidget):
         worker.start()
 
     def _install_flatpak(self, path: str) -> None:
+        self._last_install_type = FileType.FLATPAK
         self._status.setText("Installing Flatpak...")
         worker = TaskWorker(install_flatpak_file, path)
         worker.finished_sig.connect(self._on_simple_result)
@@ -245,12 +309,18 @@ class FileInstallerView(QWidget):
             cmd, total_steps=100, privileged=False, parent=self,
         )
         dlg.exec()
+        if dlg.success and build_system == "pkgbuild":
+            invalidate_pacman_cache()
         self._status.setText("Done" if dlg.success else "Build failed — check log for details")
 
     def _on_simple_result(self, ok: bool, data: object) -> None:
         from asm.core.file_installer import InstallResult
         if isinstance(data, InstallResult):
             if data.success:
+                if getattr(self, "_last_install_type", None) == FileType.DEB:
+                    invalidate_pacman_cache()
+                elif getattr(self, "_last_install_type", None) == FileType.FLATPAK:
+                    flatpak_backend.invalidate_flatpak_cache()
                 msg = data.message
                 if data.warnings:
                     msg += "\n\nWarnings:\n" + "\n".join(data.warnings)

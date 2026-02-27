@@ -3,7 +3,14 @@
 import os
 import sys
 
-os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.services.warning=false")
+os.environ.setdefault(
+    "QT_LOGGING_RULES",
+    "qt.svg.warning=false;qt.qpa.services.warning=false;kf.kio.widgets.kdirmodel=false",
+)
+
+from asm.core.logger import setup_logging
+
+setup_logging()
 
 from asm.app import ASMApp
 from asm.ui.main_window import MainWindow

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Sequence
 
+from asm.core.cache import get, set_, invalidate, CACHE_TTL_INSTALLED, CACHE_TTL_SEARCH
+
 
 @dataclass
 class PackageInfo:
@@ -69,7 +71,12 @@ def list_installed_detailed() -> dict[str, PackageInfo]:
 
     Returns a dict mapping package name -> PackageInfo. This is dramatically
     faster than calling get_package_info() per package (1 subprocess vs 1400+).
+    Cached for 60s; invalidate with invalidate_pacman_cache() after install/remove.
     """
+    cached_result = get("pacman_installed_detailed", CACHE_TTL_INSTALLED)
+    if cached_result is not None:
+        return cached_result
+
     output = _run(["pacman", "-Qi"], timeout=60)
     if not output.strip():
         return {}
@@ -83,7 +90,15 @@ def list_installed_detailed() -> dict[str, PackageInfo]:
         info = _parse_info_block(block, is_installed=True)
         if info.name:
             result[info.name] = info
+
+    set_("pacman_installed_detailed", result, CACHE_TTL_INSTALLED)
     return result
+
+
+def invalidate_pacman_cache() -> None:
+    """Call after install/remove to refresh package list."""
+    invalidate("pacman_installed_detailed")
+    invalidate("pacman_search", prefix=True)
 
 
 def get_package_info(name: str, installed: bool = True) -> PackageInfo | None:
@@ -147,7 +162,12 @@ def get_package_files(name: str) -> list[str]:
 
 
 def search_repos(query: str) -> list[PackageInfo]:
-    """Search official repos for packages matching query."""
+    """Search official repos for packages matching query. Cached 5 min."""
+    cache_key = f"pacman_search:{query}"
+    cached_result = get(cache_key, CACHE_TTL_SEARCH)
+    if cached_result is not None:
+        return cached_result
+
     output = _run(["pacman", "-Ss", query], timeout=15)
     packages = []
     lines = output.strip().splitlines()
@@ -169,6 +189,8 @@ def search_repos(query: str) -> list[PackageInfo]:
                 )
                 packages.append(pkg)
         i += 1
+
+    set_(cache_key, packages, CACHE_TTL_SEARCH)
     return packages
 
 
@@ -188,6 +210,11 @@ def get_group_packages(group: str) -> list[str]:
 def install_command(names: Sequence[str]) -> list[str]:
     """Return the command list for installing packages from repos."""
     return ["pacman", "-S", "--noconfirm"] + list(names)
+
+
+def install_paru_command() -> list[str]:
+    """Return command to install paru from official repos (for AUR helper setup)."""
+    return ["pacman", "-S", "--noconfirm", "paru"]
 
 
 def remove_command(names: Sequence[str], recursive: bool = True) -> list[str]:

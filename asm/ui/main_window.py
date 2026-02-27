@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QIcon, QAction, QShortcut, QKeySequence
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QStackedWidget, QLabel, QButtonGroup, QStatusBar, QSizePolicy,
@@ -13,6 +13,7 @@ from asm.app import ASMApp
 from asm.ui.installed_view import InstalledView
 from asm.ui.repo_browser import RepoBrowser
 from asm.ui.aur_browser import AURBrowser
+from asm.ui.snap_view import SnapView
 from asm.ui.file_installer_view import FileInstallerView
 from asm.ui.flatpak_view import FlatpakView
 from asm.ui.settings_view import SettingsView
@@ -22,8 +23,9 @@ NAV_ITEMS = [
     ("Installed",    "computer",          "Manage installed programs"),
     ("Repositories", "system-software-install", "Browse official repos"),
     ("AUR",          "globe",             "Browse the AUR"),
-    ("Install File", "folder-open",       "Install from file"),
+    ("Snap",         "package-x-generic",  "Browse Snap Store"),
     ("Flatpak",      "application-x-executable", "Browse Flathub"),
+    ("Install File", "folder-open",       "Install from file"),
     ("Settings",     "preferences-system", "App settings & tools"),
 ]
 
@@ -104,6 +106,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(version_label)
 
         self._nav_group.idClicked.connect(self._on_nav)
+
+        # Log viewer shortcut: Ctrl+Shift+L
+        log_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        log_shortcut.activated.connect(self._open_log_viewer)
+
         return sidebar
 
     # ── Content Stack ──
@@ -119,8 +126,9 @@ class MainWindow(QMainWindow):
             InstalledView(self),
             RepoBrowser(self),
             AURBrowser(self),
-            FileInstallerView(self),
+            SnapView(self),
             FlatpakView(self),
+            FileInstallerView(self),
             SettingsView(self),
         ]
         for v in self._views:
@@ -137,6 +145,11 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self) -> None:
         new = self.app.toggle_theme()
         self.statusBar().showMessage(f"Theme switched to {new}")
+
+    def _open_log_viewer(self) -> None:
+        from asm.ui.widgets.log_viewer_dialog import LogViewerDialog
+        dlg = LogViewerDialog(parent=self)
+        dlg.show()
 
     # ── Persist window geometry ──
     def closeEvent(self, event) -> None:

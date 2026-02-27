@@ -4,6 +4,10 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QLockFile, QStandardPaths
+
+from asm.core.logger import get_logger
+
+_log = get_logger("app")
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
@@ -30,6 +34,7 @@ class ASMApp(QApplication):
 
         self.config = Config()
         self.apply_theme(self.config.get("theme"))
+        _log.info("Ty's ASM started")
 
     # ── Lock file for single instance ──
     def acquire_lock(self) -> bool:
@@ -52,4 +57,5 @@ class ASMApp(QApplication):
         new_theme = "light" if current == "dark" else "dark"
         self.config.set("theme", new_theme)
         self.apply_theme(new_theme)
+        _log.info("Theme switched to %s", new_theme)
         return new_theme
