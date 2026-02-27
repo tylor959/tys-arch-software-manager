@@ -209,6 +209,9 @@ def _format_debtap_output(result: subprocess.CompletedProcess[str]) -> str:
 def install_appimage(path: str, integrate: bool = True) -> InstallResult:
     """Install an AppImage — make executable and optionally create .desktop entry."""
     warnings: list[str] = []
+    err = _validate_install_path(path)
+    if err:
+        return InstallResult(False, err, warnings)
     try:
         app_dir = Path.home() / "Applications"
         app_dir.mkdir(exist_ok=True)
@@ -242,6 +245,21 @@ def _create_appimage_desktop(appimage_path: Path) -> None:
     )
 
 
+def _validate_install_path(path: str) -> str | None:
+    """Validate path is a real, readable file. Returns error message or None if ok."""
+    if not path:
+        return "Invalid path"
+    path = str(path)
+    p = Path(path).resolve()
+    if not p.exists():
+        return "File does not exist"
+    if not p.is_file():
+        return "Path is not a file"
+    if not os.access(p, os.R_OK):
+        return "File is not readable"
+    return None
+
+
 def install_deb(
     path: str,
     progress_callback: Callable[[str], None] | None = None,
@@ -252,6 +270,10 @@ def install_deb(
     def _progress(msg: str) -> None:
         if progress_callback:
             progress_callback(msg)
+
+    err = _validate_install_path(path)
+    if err:
+        return InstallResult(False, err, warnings)
 
     if not shutil.which("debtap"):
         if is_installed("debtap"):
@@ -350,6 +372,9 @@ def install_deb(
 def install_rpm(path: str) -> InstallResult:
     """Install an .rpm file by extracting and attempting to install."""
     warnings: list[str] = []
+    err = _validate_install_path(path)
+    if err:
+        return InstallResult(False, err, warnings)
     # bsdtar (libarchive) can extract RPM directly; rpmextract and rpm2cpio are alternatives
     if not any(_tool_available(t) for t in ("rpmextract", "rpm2cpio", "bsdtar")):
         return InstallResult(
@@ -405,22 +430,26 @@ def install_tar(path: str, build_system: str = "") -> list[str]:
     """Return the command sequence for installing from a tarball.
 
     Returns a list of shell commands to execute sequentially.
+    Uses shlex.quote to prevent command injection from user-controlled paths.
+    Caller should validate path with _validate_install_path before calling.
     """
     extract_dir = tempfile.mkdtemp(prefix="asm-tar-")
+    safe_path = shlex.quote(path)
+    safe_extract = shlex.quote(extract_dir)
 
     if path.lower().endswith(".tar.zst"):
-        extract_cmd = f"tar --zstd -xf '{path}' -C '{extract_dir}'"
+        extract_cmd = f"tar --zstd -xf {safe_path} -C {safe_extract}"
     elif path.lower().endswith(".tar.xz"):
-        extract_cmd = f"tar -xJf '{path}' -C '{extract_dir}'"
+        extract_cmd = f"tar -xJf {safe_path} -C {safe_extract}"
     elif path.lower().endswith(".tar.bz2"):
-        extract_cmd = f"tar -xjf '{path}' -C '{extract_dir}'"
+        extract_cmd = f"tar -xjf {safe_path} -C {safe_extract}"
     else:
-        extract_cmd = f"tar -xzf '{path}' -C '{extract_dir}'"
+        extract_cmd = f"tar -xzf {safe_path} -C {safe_extract}"
 
     cmds = [extract_cmd]
 
     # Find the actual source directory (often one level deep)
-    cmds.append(f"cd \"$(find '{extract_dir}' -mindepth 1 -maxdepth 1 -type d | head -1)\" 2>/dev/null || cd '{extract_dir}'")
+    cmds.append(f"cd \"$(find {safe_extract} -mindepth 1 -maxdepth 1 -type d | head -1)\" 2>/dev/null || cd {safe_extract}")
 
     if build_system == "pkgbuild":
         cmds.append("makepkg -si --noconfirm")
@@ -439,6 +468,9 @@ def install_tar(path: str, build_system: str = "") -> list[str]:
 def install_flatpak_file(path: str) -> InstallResult:
     """Install a .flatpak or .flatpakref file."""
     warnings: list[str] = []
+    err = _validate_install_path(path)
+    if err:
+        return InstallResult(False, err, warnings)
     if not shutil.which("flatpak"):
         return InstallResult(
             False,

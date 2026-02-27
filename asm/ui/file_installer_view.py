@@ -300,7 +300,11 @@ class FileInstallerView(QWidget):
         worker.start()
 
     def _install_tar(self, path: str, build_system: str) -> None:
-        from asm.core.file_installer import install_tar
+        from asm.core.file_installer import _validate_install_path, install_tar
+        err = _validate_install_path(path)
+        if err:
+            QMessageBox.warning(self, "Invalid Path", err)
+            return
         cmds = install_tar(path, build_system)
         full_cmd = " && ".join(cmds)
         cmd = ["bash", "-c", full_cmd]

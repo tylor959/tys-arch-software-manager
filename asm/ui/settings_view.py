@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -516,10 +517,12 @@ class SettingsView(QWidget):
             return
 
         user = os.getlogin()
+        safe_app_dir = shlex.quote(app_dir)
+        safe_user = shlex.quote(user)
         script = (
-            f"mkdir -p '{app_dir}' && "
-            f"chown -R {user}:{user} '{app_dir}' && "
-            f"chmod -R u+rwX,go+rX '{app_dir}'"
+            f"mkdir -p {safe_app_dir} && "
+            f"chown -R {safe_user}:{safe_user} {safe_app_dir} && "
+            f"chmod -R u+rwX,go+rX {safe_app_dir}"
         )
         cmd = ["bash", "-c", script]
         dlg = ProgressDialog("Configuring disk", cmd, total_steps=5, privileged=True, parent=self)
@@ -570,9 +573,15 @@ class SettingsView(QWidget):
             return
 
         block = f"\n[{name.strip()}]\nServer = {server.strip()}\n"
-        cmd = ["bash", "-c", f"echo '{block}' >> /etc/pacman.conf"]
-        dlg = ProgressDialog("Adding repository", cmd, total_steps=5, privileged=True, parent=self)
-        dlg.exec()
+        # Use tee to avoid shell injection; block is passed via stdin, not interpolated
+        result = subprocess.run(
+            ["pkexec", "tee", "-a", "/etc/pacman.conf"],
+            input=block, text=True, capture_output=True, timeout=10,
+        )
+        if result.returncode != 0:
+            QMessageBox.warning(self, "Failed", f"Could not add repository: {result.stderr}")
+        else:
+            QMessageBox.information(self, "Done", f"Repository [{name.strip()}] added.")
         self._load_repos()
 
     def _toggle_repo(self) -> None:
@@ -581,12 +590,34 @@ class SettingsView(QWidget):
             return
         name = item.data(Qt.ItemDataRole.UserRole)
         text = item.text()
-        if "[active]" in text:
-            cmd = ["bash", "-c", f"sed -i 's/^\\[{name}\\]/#[{name}]/' /etc/pacman.conf"]
-        else:
-            cmd = ["bash", "-c", f"sed -i 's/^#\\[{name}\\]/[{name}]/' /etc/pacman.conf"]
-        dlg = ProgressDialog(f"Toggling {name}", cmd, total_steps=5, privileged=True, parent=self)
-        dlg.exec()
+        # Use Python to avoid shell injection; name passed as argv, not interpolated
+        disable = "[active]" in text
+        script = r"""
+import sys
+name = sys.argv[1]
+disable = sys.argv[2] == "1"
+section = "[" + name + "]"
+commented = "#" + section
+with open("/etc/pacman.conf", "r") as f:
+    lines = f.readlines()
+out = []
+for line in lines:
+    s = line.strip()
+    if s == section:
+        out.append((commented + "\n") if disable else line)
+    elif s == commented:
+        out.append((section + "\n") if not disable else line)
+    else:
+        out.append(line)
+with open("/etc/pacman.conf", "w") as f:
+    f.writelines(out)
+"""
+        result = subprocess.run(
+            ["pkexec", "python3", "-c", script, name, "1" if disable else "0"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            QMessageBox.warning(self, "Failed", f"Could not toggle repository: {result.stderr}")
         self._load_repos()
 
     def _sync_databases(self) -> None:
